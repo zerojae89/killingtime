@@ -1,54 +1,100 @@
-import java.awt.BorderLayout;
-import java.awt.FlowLayout;
-import javax.swing.BorderFactory;
-import javax.swing.JButton;
-import javax.swing.JFrame;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.JTextField;
-import javax.swing.SwingUtilities;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 
 public class Main {
-    public static void main(String[] args) {
-        SwingUtilities.invokeLater(Main::showWindow);
-    }
+    private static final int MAX_NAME_BYTES = 1024;
 
-    private static void showWindow() {
-        JFrame window = new JFrame("인사 만들기");
-        window.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+    public static void main(String[] args) throws IOException {
+        String template = new String(readResource("/index.jsp"), StandardCharsets.UTF_8);
+        int pageStart = template.indexOf("<!doctype html>");
+        if (pageStart < 0) {
+            throw new IOException("index.jsp에서 HTML 본문을 찾을 수 없습니다.");
+        }
+        byte[] page = template.substring(pageStart).getBytes(StandardCharsets.UTF_8);
+        byte[] script = readResource("/greeting.js");
+        byte[] styles = readResource("/greeting.css");
 
-        JTextField nameField = new JTextField(16);
-        JButton greetButton = new JButton("인사하기");
-        JLabel result = new JLabel(" ");
 
-        JPanel form = new JPanel(new FlowLayout(FlowLayout.LEADING, 8, 0));
-        JLabel nameLabel = new JLabel("이름");
-        nameLabel.setLabelFor(nameField);
-        form.add(nameLabel);
-        form.add(nameField);
-        form.add(greetButton);
-
-        greetButton.addActionListener(event -> {
-            result.setText(greeting(nameField.getText()));
-            window.pack();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 8080), 0);
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                String path = exchange.getRequestURI().getPath();
+                if (path.equals("/")) {
+                    if (requireMethod(exchange, "GET")) {
+                        send(exchange, 200, "text/html", page);
+                    }
+                } else if (path.equals("/greeting.js")) {
+                    if (requireMethod(exchange, "GET")) {
+                        send(exchange, 200, "text/javascript", script);
+                    }
+                } else if (path.equals("/greeting.css")) {
+                    if (requireMethod(exchange, "GET")) {
+                        send(exchange, 200, "text/css", styles);
+                    }
+                } else {
+                    sendText(exchange, 404, "페이지를 찾을 수 없습니다.");
+                }
+            }
         });
-
-        JPanel content = new JPanel(new BorderLayout(0, 12));
-        content.setBorder(BorderFactory.createEmptyBorder(16, 16, 16, 16));
-        content.add(form, BorderLayout.CENTER);
-        content.add(result, BorderLayout.SOUTH);
-
-        window.setContentPane(content);
-        window.getRootPane().setDefaultButton(greetButton);
-        window.pack();
-        window.setMinimumSize(window.getSize());
-        window.setLocationRelativeTo(null);
-        window.setVisible(true);
-        nameField.requestFocusInWindow();
+        server.createContext("/api/greeting", Main::handleGreeting);
+        server.start();
+        System.out.println("인사 만들기: http://127.0.0.1:8080/");
     }
 
-    static String greeting(String input) {
-        String name = input.strip();
-        return name.isEmpty() ? "이름을 입력해 주세요." : "안녕하세요, " + name + "님!";
+    private static byte[] readResource(String path) throws IOException {
+        try (InputStream resource = Main.class.getResourceAsStream(path)) {
+            if (resource == null) {
+                throw new IOException(path + " 파일을 찾을 수 없습니다. 클래스패스에 web 폴더를 추가하세요.");
+            }
+            return resource.readAllBytes();
+        }
+    }
+
+
+    private static void handleGreeting(HttpExchange exchange) throws IOException {
+        try (exchange) {
+            if (!exchange.getRequestURI().getPath().equals("/api/greeting")) {
+                sendText(exchange, 404, "페이지를 찾을 수 없습니다.");
+                return;
+            }
+            if (!requireMethod(exchange, "POST")) {
+                return;
+            }
+            byte[] body = exchange.getRequestBody().readNBytes(MAX_NAME_BYTES + 1);
+            if (body.length > MAX_NAME_BYTES) {
+                sendText(exchange, 413, "이름이 너무 깁니다.");
+                return;
+            }
+            String name = new String(body, StandardCharsets.UTF_8).strip();
+            if (name.isEmpty()) {
+                sendText(exchange, 400, "이름을 입력해 주세요.");
+                return;
+            }
+            sendText(exchange, 200, "안녕하세요, " + name + "님!");
+        }
+    }
+
+    private static boolean requireMethod(HttpExchange exchange, String method) throws IOException {
+        if (method.equals(exchange.getRequestMethod())) {
+            return true;
+        }
+        exchange.getResponseHeaders().set("Allow", method);
+        sendText(exchange, 405, "지원하지 않는 요청 방식입니다.");
+        return false;
+    }
+
+    private static void sendText(HttpExchange exchange, int status, String body) throws IOException {
+        send(exchange, status, "text/plain", body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void send(HttpExchange exchange, int status, String type, byte[] body) throws IOException {
+        exchange.getResponseHeaders().set("Content-Type", type + "; charset=UTF-8");
+        exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+        exchange.sendResponseHeaders(status, body.length);
+        exchange.getResponseBody().write(body);
     }
 }
